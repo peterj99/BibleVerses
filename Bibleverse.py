@@ -7,6 +7,8 @@ from datetime import datetime
 # Configure Gemini API
 api_key = st.secrets["GEMINI_API_KEY"]
 
+#test
+
 # Updated Base Prompt with Uniqueness Consideration
 base_prompt = """
 Objective: You are an expert in creating comprehensive Christian spiritual content. Your task is to generate a JSON object with the following keys: daily_verse, daily_devotional, prayer_guide, and religious_insight.
