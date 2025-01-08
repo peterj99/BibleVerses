@@ -10,7 +10,7 @@ import tempfile
 import base64
 import requests
 
-# Load environment variables
+## Load environment variables
 # load_dotenv()
 # gemini_api_key = os.getenv("GEMINI_API_KEY")
 # google_cloud_api_key = os.getenv("GOOGLE_CLOUD_API_KEY")
