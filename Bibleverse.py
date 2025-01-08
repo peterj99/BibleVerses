@@ -41,11 +41,11 @@ daily_verse:
 - Choose meaningful, impactful verses
 
 daily_devotional: 
-- 80-word reflection on the verse
+- 50-word reflection on the verse
 - Focus on practical application and spiritual insight
 
 prayer_guide: 
-- 80-word prayer related to the verse
+- 50-word prayer related to the verse
 - Include praise, gratitude, and request elements
 
 religious_insight: 
@@ -53,10 +53,28 @@ religious_insight:
 - Relevant to current season or verse theme
 
 guided_scripture: 
-- 200-word sermon in plain text format
+- 250-word sermon in plain text format
 - Include introduction, message, practical application, and closing thought
 - Flow naturally as spoken content
 - Include 1-2 supporting verses
+   - Structure:
+        * Start with a compelling hook (intriguing question, surprising fact, or relatable scenario)
+        * Include a relevant contemporary anecdote or story
+        * Weave in 1-2 verses naturally into the narrative
+        * Connect ancient wisdom to modern life
+        * End with a powerful, memorable takeaway
+    - Engagement elements:
+        * Use vivid descriptions and imagery
+        * Include rhetorical questions to prompt reflection
+        * Share relatable examples from daily life
+        * Add appropriate cultural references or analogies
+        * Create moments of surprise or discovery
+    - Technical requirements:
+        * Flow naturally as spoken content
+        * When referencing verses, use full spoken format (e.g., "Psalms chapter 3 verse 19" instead of "Psalms 3.19")
+        * Format all numerical references in a speech-friendly way
+        * Vary sentence length and structure for dynamic delivery
+        * Use pauses and transitions effectively
 
 verse_image_prompt: 
 - 30-word image prompt
