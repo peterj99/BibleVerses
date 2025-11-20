@@ -441,7 +441,7 @@ class AudioGenerator:
 def render_card(content: dict, audio_bytes: Optional[bytes], image_bytes: Optional[bytes]):
     """Standard Card Display Component"""
     if image_bytes:
-        st.image(image_bytes, width='stretch')
+        st.image(image_bytes, use_column_width=True)
     
     st.markdown("### 🎙️ The Message")
     if audio_bytes:
