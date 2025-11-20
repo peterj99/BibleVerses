@@ -4,11 +4,14 @@ from google.cloud import texttospeech
 from google.oauth2 import service_account
 import vertexai
 from vertexai.preview.vision_models import ImageGenerationModel
+from google.ai import generativelanguage as glm
 import json
 import datetime
 import random
 import hashlib
 from typing import Optional, List, Tuple
+from google.genai import types
+import wave
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Luminary", page_icon="🕯️", layout="centered")
@@ -396,39 +399,41 @@ class ImageGenerator:
             return None
 
 class AudioGenerator:
-    def __init__(self):
-        self.model = genai.GenerativeModel("gemini-2.5-flash-preview-tts")
-
     def generate(self, text: str, tone_guide: str) -> Optional[bytes]:
-        """Generates audio using the native Gemini TTS model for more natural speech."""
+        """Generates audio using the Google Cloud Text-to-Speech API with Gemini models."""
+        print("--- Starting Audio Generation ---")
         try:
-            # Construct a style prompt to guide the AI's delivery
-            style_prompt = f"""
-            Read this in the voice of a wise, mature, trusted friend.
-            Your tone should be {tone_guide}.
-            Speak with warmth and gravitas, using natural pauses.
-            Your delivery should feel like a personal, comforting message, not a formal speech.
+            prompt = f"Read this in the voice of a wise, mature, trusted friend. Your tone should be {tone_guide}. Speak with warmth and gravitas, using natural pauses. Your delivery should feel like a personal, comforting message, not a formal speech."
+            print(f"System Instruction: {prompt}")
+            print(f"Text to synthesize: {text[:100]}...")
 
-            Here is the text to read:
-            "{text}"
-            """
+            synthesis_input = texttospeech.SynthesisInput(text=text, prompt=prompt)
 
-            response = self.model.generate_content(
-                contents=style_prompt,
-                generation_config=genai.GenerationConfig(
-                    response_modalities=["AUDIO"],
-                    speech_config=genai.types.SpeechConfig(
-                        voice_config=genai.types.VoiceConfig(
-                            prebuilt_voice_config=genai.types.PrebuiltVoiceConfig(
-                                voice_name='Charon', # A deep, informative voice
-                            )
-                        )
-                    ),
-                )
+            # Select the voice you want to use.
+            voice = texttospeech.VoiceSelectionParams(
+                language_code="en-US",
+                name="Charon",  # Example voice, adjust as needed
+                model_name="gemini-2.5-pro-tts" # Use the new Gemini model
             )
-            return response.candidates[0].content.parts[0].inline_data.data
+
+            audio_config = texttospeech.AudioConfig(
+                audio_encoding=texttospeech.AudioEncoding.LINEAR16 # WAV format
+            )
+
+            print("Synthesizing speech with Cloud TTS (Gemini)...")
+            response = tts_client.synthesize_speech(
+                input=synthesis_input, voice=voice, audio_config=audio_config
+            )
+
+            print("Successfully synthesized speech.")
+            print(f"Audio content size: {len(response.audio_content)} bytes.")
+            print("--- Finished Audio Generation ---")
+            return response.audio_content
+
         except Exception as e:
+            print(f"!!! An exception occurred during audio generation: {e}")
             st.error(f"Audio generation error: {e}")
+            print("--- Audio Generation Failed ---")
             return None
 
 # --- 7. UI COMPONENTS ---
@@ -436,11 +441,11 @@ class AudioGenerator:
 def render_card(content: dict, audio_bytes: Optional[bytes], image_bytes: Optional[bytes]):
     """Standard Card Display Component"""
     if image_bytes:
-        st.image(image_bytes, use_container_width=True)
+        st.image(image_bytes, width='stretch')
     
     st.markdown("### 🎙️ The Message")
     if audio_bytes:
-        st.audio(audio_bytes, format="audio/mp3")
+        st.audio(audio_bytes, format="audio/wav")
     
     st.divider()
     st.markdown(f"**{content['wisdom_bridge']}**")
@@ -507,6 +512,16 @@ def save_book_to_storage(book: str):
 
 def main():
     # Initialize State
+    print("--- Listing Available Models ---")
+    try:
+        print("Available models for TTS:")
+        for m in genai.list_models():
+            if "tts" in m.name:
+                print(f"- {m.name}: {m.supported_generation_methods}")
+    except Exception as e:
+        print(f"--- Could not list models: {e} ---")
+    print("-----------------------------")
+
     if 'user_book' not in st.session_state:
         stored_book = get_stored_book()
         st.session_state.user_book = stored_book if stored_book else "Universal"
