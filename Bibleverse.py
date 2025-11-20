@@ -399,34 +399,44 @@ class ImageGenerator:
             return None
 
 class AudioGenerator:
+    def __init__(self):
+        # This class now uses the google.cloud.texttospeech.TextToSpeechClient
+        # which is initialized globally as tts_client.
+        pass
+
     def generate(self, text: str, tone_guide: str) -> Optional[bytes]:
-        """Generates audio using the Google Cloud Text-to-Speech API with Gemini models."""
-        print("--- Starting Audio Generation ---")
+        """Generates audio using the Google Cloud Text-to-Speech API with styling."""
+        print("--- Starting Audio Generation (using google-cloud-texttospeech) ---")
         try:
-            prompt = f"Read this in the voice of a wise, mature, trusted friend. Your tone should be {tone_guide}. Speak with warmth and gravitas, using natural pauses. Your delivery should feel like a personal, comforting message, not a formal speech."
-            print(f"System Instruction: {prompt}")
+            styling_prompt = (
+                f"Read this in the voice of a wise, mature, trusted friend. "
+                f"Your tone should be {tone_guide}. Speak with warmth and gravitas, "
+                f"using natural pauses. Your delivery should feel like a personal, "
+                f"comforting message, not a formal speech."
+            )
+            print(f"Styling Prompt: {styling_prompt}")
             print(f"Text to synthesize: {text[:100]}...")
 
-            synthesis_input = texttospeech.SynthesisInput(text=text, prompt=prompt)
+            synthesis_input = texttospeech.SynthesisInput(text=text, prompt=styling_prompt)
 
-            # Select the voice you want to use.
+            # Following the user's provided example for a generative TTS model,
+            # we use a high-quality voice and provide the styling via the prompt.
             voice = texttospeech.VoiceSelectionParams(
                 language_code="en-US",
-                name="Charon",  # Example voice, adjust as needed
-                model_name="gemini-2.5-pro-tts" # Use the new Gemini model
+                name="Charon",  # A Gemini TTS voice that supports the 'prompt' parameter.
+                model_name="gemini-2.5-pro-tts"
             )
 
+            # The app expects WAV format for st.audio.
             audio_config = texttospeech.AudioConfig(
-                audio_encoding=texttospeech.AudioEncoding.LINEAR16 # WAV format
+                audio_encoding=texttospeech.AudioEncoding.LINEAR16  # WAV format
             )
 
-            print("Synthesizing speech with Cloud TTS (Gemini)...")
             response = tts_client.synthesize_speech(
                 input=synthesis_input, voice=voice, audio_config=audio_config
             )
 
-            print("Successfully synthesized speech.")
-            print(f"Audio content size: {len(response.audio_content)} bytes.")
+            print(f"Total audio size: {len(response.audio_content)} bytes.")
             print("--- Finished Audio Generation ---")
             return response.audio_content
 
@@ -441,7 +451,7 @@ class AudioGenerator:
 def render_card(content: dict, audio_bytes: Optional[bytes], image_bytes: Optional[bytes]):
     """Standard Card Display Component"""
     if image_bytes:
-        st.image(image_bytes, use_column_width=True)
+        st.image(image_bytes, width='stretch')
     
     st.markdown("### 🎙️ The Message")
     if audio_bytes:
