@@ -1,461 +1,261 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import google.generativeai as genai
+from google.cloud import texttospeech
+from google.oauth2 import service_account
+import vertexai
+from vertexai.preview.vision_models import ImageGenerationModel
 import json
-import requests
 import re
-import os
-import random
-from datetime import datetime
 import base64
 import tempfile
-from dotenv import load_dotenv
 
-# Configure API keys from streamlit secrets
-# load_dotenv()
-# gemini_api_key = os.getenv("GEMINI_API_KEY")
-# google_cloud_api_key = os.getenv("GOOGLE_CLOUD_API_KEY")
-# rubberband_api_key = os.getenv("RUBBERBAND_API_KEY")
+# --- Configuration & Auth ---
+st.set_page_config(page_title="Daily Grace", page_icon="🙏", layout="centered")
 
-# streamlit secrets
-gemini_api_key = st.secrets["GEMINI_API_KEY"]
-google_cloud_api_key = st.secrets["GOOGLE_CLOUD_API_KEY"]
-rubberband_api_key = st.secrets["RUBBERBAND_API_KEY"]
+# Load Secrets
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    PROJECT_ID = st.secrets["GCP_PROJECT_ID"]
+    LOCATION = st.secrets["GCP_LOCATION"]
+    # Load GCP Credentials from secrets TOML dictionary
+    GCP_CREDS = service_account.Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"]
+    )
+except Exception as e:
+    st.error(f"❌ Missing Secrets: {e}. Please check .streamlit/secrets.toml")
+    st.stop()
 
-# Validate API keys
-for key, name in [(gemini_api_key, "GEMINI_API_KEY"),
-                  (google_cloud_api_key, "GOOGLE_CLOUD_API_KEY"),
-                  (rubberband_api_key, "RUBBERBAND_API_KEY")]:
-    if not key:
-        raise ValueError(f"No {name} found in secrets.")
+# Initialize Clients
+genai.configure(api_key=GEMINI_API_KEY)
+vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=GCP_CREDS)
 
+# --- Class Definitions ---
 
 class CacheManager:
+    """Manages session state to persist data across reruns"""
     def __init__(self):
-        self.initialize_cache()
-
-    def initialize_cache(self):
-        """Initialize all cache-related session states"""
         if 'content_cache' not in st.session_state:
             st.session_state.content_cache = {}
-        if 'image_cache' not in st.session_state:
-            st.session_state.image_cache = {}
-        if 'audio_cache' not in st.session_state:
-            st.session_state.audio_cache = {}
+        if 'current_content' not in st.session_state:
+            st.session_state.current_content = None
+        if 'audio_data' not in st.session_state:
+            st.session_state.audio_data = None
+        if 'generated_image_url' not in st.session_state:
+            st.session_state.generated_image_url = None
 
-    def get_cached_content(self, verse):
-        """Get cached content for a verse if it exists"""
-        return st.session_state.content_cache.get(verse)
-
-    def cache_content(self, verse, content):
-        """Cache content for a verse"""
-        st.session_state.content_cache[verse] = content
-
-    def get_cached_image(self, prompt):
-        """Get cached image URL for a prompt"""
-        return st.session_state.image_cache.get(prompt)
-
-    def cache_image(self, prompt, url):
-        """Cache image URL for a prompt"""
-        st.session_state.image_cache[prompt] = url
-
-    def get_cached_audio(self, text_hash):
-        """Get cached audio file for text"""
-        return st.session_state.audio_cache.get(text_hash)
-
-    def cache_audio(self, text_hash, file_path):
-        """Cache audio file path"""
-        st.session_state.audio_cache[text_hash] = file_path
+    def clear_current(self):
+        st.session_state.generated_image_url = None
+        st.session_state.audio_data = None
 
 
-class VerseManager:
-    def __init__(self, max_history=5):
-        self.max_history = max_history
-        self.cache_manager = CacheManager()
-        self.api_client = None  # Will be set by DailyGraceApp
-
-    def initialize_session_state(self):
-        """Initialize session state for verse tracking if not exists"""
-        if 'previous_verses' not in st.session_state:
-            st.session_state.previous_verses = []
-
-    def extract_reference(self, verse_text):
-        """Safely extract verse reference from full verse text"""
-        try:
-            if '(' in verse_text and ')' in verse_text:
-                return verse_text.split('(')[-1].split(')')[0].strip()
-            return verse_text
-        except Exception:
-            return verse_text
-
-    def is_verse_unique(self, verse_text):
-        """Check if verse reference is not in recent history"""
-        self.initialize_session_state()
-
-        if not verse_text:
-            return False
-
-        reference = self.extract_reference(verse_text)
-        return reference not in st.session_state.previous_verses
-
-    def add_verse(self, verse_text):
-        """Add verse to history and maintain max size"""
-        self.initialize_session_state()
-
-        if not verse_text:
-            return
-
-        reference = self.extract_reference(verse_text)
-        st.session_state.previous_verses.append(reference)
-        if len(st.session_state.previous_verses) > self.max_history:
-            st.session_state.previous_verses = st.session_state.previous_verses[-self.max_history:]
-
-    def get_unique_content(self):
-        """Get content with a unique verse"""
-        self.initialize_session_state()
-
-        max_attempts = 3
-        for _ in range(max_attempts):
-            try:
-                content = self.api_client.generate_spiritual_content(st.session_state.previous_verses)
-                if not content or 'daily_verse' not in content:
-                    continue
-
-                verse = content.get('daily_verse', '')
-                if self.is_verse_unique(verse):
-                    self.add_verse(verse)
-                    return content
-
-            except Exception as e:
-                st.error(f"Error generating unique content: {e}")
-                continue
-
-        # Fallback to any content as last resort
-        return self.api_client.generate_spiritual_content()
-
-
-class APIClient:
-    def __init__(self, gemini_key, google_cloud_key, rubberband_key):
-        self.gemini_key = gemini_key
-        self.google_cloud_key = google_cloud_key
-        self.rubberband_key = rubberband_key
-        genai.configure(api_key=self.gemini_key)
-        self.spiritual_model = genai.GenerativeModel("gemini-1.5-pro")
-        self.cache_manager = CacheManager()
-
-    def generate_spiritual_content(self, previous_verses=None):
-        """Generate spiritual content with deduplication check"""
-        prompt = self._build_prompt(previous_verses)
-        try:
-            response = self.spiritual_model.generate_content(prompt)
-            text = response.text.strip()
-            if text.startswith('```json'):
-                text = text[7:-3]
-            return json.loads(text)
-        except Exception as e:
-            st.error(f"Error generating content: {e}")
-            return None
-
-    def generate_image(self, prompt):
-        """Generate image with error handling and retries"""
-        # Check cache first
-        cached_image = self.cache_manager.get_cached_image(prompt)
-        if cached_image:
-            return cached_image
-
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = requests.post(
-                    "https://superman.rubbrband.com/get_rubbrband_image",
-                    json={
-                        "api_key": self.rubberband_key,
-                        "prompt": prompt,
-                        "num_images": 1,
-                        "aspect_ratio": "16:9"
-                    }
-                )
-                response.raise_for_status()
-                image_url = response.json().get("data", [None])[0]
-                if image_url:
-                    self.cache_manager.cache_image(prompt, image_url)
-                return image_url
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    st.error(f"Error generating image after {max_retries} attempts: {e}")
-                    return None
-                continue
-
-    def convert_text_to_speech(self, text):
-        """Convert text to speech with caching"""
-        text_hash = hash(text)
-
-        # Check cache first
-        cached_audio = self.cache_manager.get_cached_audio(text_hash)
-        if cached_audio:
-            return cached_audio
-
-        try:
-            response = requests.post(
-                f"https://texttospeech.googleapis.com/v1/text:synthesize?key={self.google_cloud_key}",
-                json={
-                    'input': {'text': text},
-                    'voice': {
-                        'languageCode': 'en-US',
-                        'name': 'en-US-Neural2-D',
-                        'ssmlGender': 'MALE'
-                    },
-                    'audioConfig': {
-                        'audioEncoding': 'MP3',
-                        'speakingRate': 0.85,
-                        'pitch': -0.5,
-                        'volumeGainDb': 1
-                    }
-                }
-            )
-            response.raise_for_status()
-
-            audio_content = response.json().get('audioContent')
-            if not audio_content:
-                raise ValueError("No audio content received")
-
-            audio_data = base64.b64decode(audio_content)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
-                temp_audio.write(audio_data)
-                self.cache_manager.cache_audio(text_hash, temp_audio.name)
-                return temp_audio.name
-
-        except Exception as e:
-            st.error(f"Text-to-speech error: {e}")
-            return None
-
-    def extract_key_phrase(self, verse):
-        """Extract key phrase from verse"""
-        try:
-            response = self.spiritual_model.generate_content(
-                f"""Extract a short, impactful part from this verse: {verse}, that captures its essence. 
-                This part should be between 4 to 10 words long and should have meaning when read alone. 
-                It should convey the main message or theme of the verse. Return only the part, nothing else."""
-            )
-            return response.text.strip()
-        except:
-            # Fallback: take first 5 words
-            main_verse = verse.split('(')[0].strip()
-            return ' '.join(main_verse.split()[:5])
-
-    def _build_prompt(self, previous_verses=None):
-        """Build prompt with previous verses for deduplication"""
-        previous_verses_text = ""
-        if previous_verses:
-            previous_verses_text = f"\nAvoid these verses: {', '.join(previous_verses)}"
-
-        return f"""Consider that you are an expert in giving christian religious content. Generate a JSON object with:
-        - daily_verse: KJV Bible verse '[Text] (Book Ch:Verse)'{previous_verses_text}
-        - daily_devotional: 50-word reflection based on the verse
-        - prayer_guide: 50-word prayer based on the verse
-        - religious_insight: Brief Christian fact based on the verse which is interesting and not so common.
-        - guided_scripture: 250-word sermon based on the verse in an engaging, conversational format. 
-            Structure:
-            * Start with a compelling hook
-            * Weave in verses naturally
-            * Connect ancient wisdom to modern life
-            * End with a powerful takeaway
-            Engagement elements:
-            * Use vivid descriptions and imagery
-            * Include rhetorical questions
-            * Share relatable examples
-            * Add appropriate cultural references
-            Technical requirements:
-            * Flow naturally as spoken content
-            * Use full spoken verse format
-        - verse_image_prompt: 30-word image prompt. The image should be used for a christian setting. Specify art style, colors, and composition. Avoid human faces.
-        Return only valid JSON."""
-
-
-class DailyGraceApp:
+class ContentGenerator:
+    """Handles Text Generation via Gemini"""
     def __init__(self):
-        self.api_client = APIClient(
-            gemini_api_key,
-            google_cloud_api_key,
-            rubberband_api_key
+        # Using the modern model with native JSON support
+        self.model = genai.GenerativeModel(
+            "gemini-1.5-flash", 
+            generation_config={"response_mime_type": "application/json"}
         )
-        self.verse_manager = VerseManager(max_history=5)
-        self.cache_manager = CacheManager()
-        self.verse_manager.api_client = self.api_client
 
-    def get_random_style(self):
-        """Get random style for overlay text"""
-        styles = {
-            'modern': {
-                'font_family': '"Montserrat", sans-serif',
-                'text_transform': 'uppercase',
-                'letter_spacing': '0.1em',
-                'gradient': 'linear-gradient(rgba(0,0,0,0.3), rgba(0,0,0,0.7))'
-            },
-            'classic': {
-                'font_family': '"Playfair Display", serif',
-                'text_transform': 'none',
-                'letter_spacing': '0.05em',
-                'gradient': 'linear-gradient(rgba(0,0,0,0.4), rgba(0,0,0,0.6))'
-            }
-        }
-        return random.choice(list(styles.values()))
-
-    def create_overlay_html(self, image_url, key_phrase, reference, style=None):
-        """Create HTML for image overlay"""
-        # Initialize style in session state if not present
-        if 'overlay_style' not in st.session_state:
-            st.session_state.overlay_style = self.get_random_style()
-
-        # Use stored style or passed style
-        style = style or st.session_state.overlay_style
-
-        return f"""
-        <html>
-        <head>
-            <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&family=Playfair+Display:wght@400;700&display=swap" rel="stylesheet">
-            <style>
-                .verse-container {{
-                    position: relative;
-                    width: 100%;
-                    height: 400px;
-                    overflow: hidden;
-                    border-radius: 12px;
-                    box-shadow: 0 8px 32px rgba(0,0,0,0.1);
-                }}
-                .verse-image {{
-                    width: 100%;
-                    height: 100%;
-                    object-fit: cover;
-                }}
-                .verse-overlay {{
-                    position: absolute;
-                    top: 0;
-                    left: 0;
-                    right: 0;
-                    bottom: 0;
-                    background: {style['gradient']};
-                    display: flex;
-                    flex-direction: column;
-                    justify-content: center;
-                    align-items: center;
-                    padding: 2rem;
-                    text-align: center;
-                }}
-                .key-phrase {{
-                    color: white;
-                    font-family: {style['font_family']};
-                    font-size: 2.5rem;
-                    font-weight: 700;
-                    text-transform: {style['text_transform']};
-                    letter-spacing: {style['letter_spacing']};
-                    text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
-                    margin-bottom: 1rem;
-                }}
-                .verse-reference {{
-                    color: rgba(255,255,255,0.9);
-                    font-family: {style['font_family']};
-                    font-size: 1.25rem;
-                    opacity: 0.8;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="verse-container">
-                <img src="{image_url}" class="verse-image" alt="Verse background"/>
-                <div class="verse-overlay">
-                    <div class="key-phrase">{key_phrase}</div>
-                    <div class="verse-reference">{reference}</div>
-                </div>
-            </div>
-        </body>
-        </html>
+    def get_spiritual_content(self):
+        prompt = """
+        You are a compassionate spiritual guide. Generate a JSON object containing:
+        1. "daily_verse": A Bible verse (KJV) with reference.
+        2. "key_phrase": A 3-5 word impactful excerpt from the verse.
+        3. "daily_devotional": A 60-word encouraging reflection.
+        4. "prayer_guide": A 50-word prayer.
+        5. "religious_insight": A fascinating historical or context fact about the verse.
+        6. "guided_scripture_sermon": A 200-word warm, spoken-word style mini-sermon suitable for audio.
+        7. "image_prompt": A high-quality prompt for an AI image generator. 
+           - Style: Cinematic, ethereal, nature-focused, golden hour lighting.
+           - Subject: Symbolic representation of the verse. 
+           - Constraint: NO TEXT, NO HUMAN FACES. 
+        
+        Ensure the JSON keys match exactly.
         """
+        try:
+            response = self.model.generate_content(prompt)
+            return json.loads(response.text)
+        except Exception as e:
+            st.error(f"Error generating text: {e}")
+            return None
 
-    def generate_new_content(self):
-        """Generate new content with deduplication"""
-        content = self.verse_manager.get_unique_content()
-        if content:
-            st.session_state.content = content
-            # Reset the overlay style when generating new content
-            st.session_state.overlay_style = self.get_random_style()
 
-            if "verse_image_prompt" in content:
-                with st.spinner("Creating verse illustration..."):
-                    image_url = self.api_client.generate_image(content["verse_image_prompt"])
-                    if image_url:
-                        st.session_state.image_url = image_url
-                        return True
-            return False
+class ImageGenerator:
+    """Handles Image Generation via Vertex AI (Imagen)"""
+    def generate(self, prompt):
+        try:
+            # Using Imagen 3 (Preview) or Imagen 2
+            model = ImageGenerationModel.from_pretrained("imagegeneration@006") 
+            
+            images = model.generate_images(
+                prompt=prompt,
+                number_of_images=1,
+                aspect_ratio="16:9",
+                safety_filter_level="block_some",
+                person_generation="allow_adult" 
+            )
+            
+            # Save to temp file to display
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp_img:
+                images[0].save(temp_img.name)
+                return temp_img.name
+                
+        except Exception as e:
+            # Fallback if Vertex is not enabled
+            st.warning(f"Vertex AI Image Gen failed ({e}). Using placeholder.")
+            return "https://images.unsplash.com/photo-1507692049790-de58293a469d?q=80&w=1000&auto=format&fit=crop"
 
+
+class AudioGenerator:
+    """Handles Text-to-Speech via Google Cloud Client Library"""
+    def __init__(self, credentials):
+        self.client = texttospeech.TextToSpeechClient(credentials=credentials)
+
+    def generate_speech(self, text):
+        synthesis_input = texttospeech.SynthesisInput(text=text)
+
+        voice = texttospeech.VoiceSelectionParams(
+            language_code="en-US",
+            name="en-US-Journey-D", # "Journey" voices are much more human-like
+            ssml_gender=texttospeech.SsmlVoiceGender.MALE
+        )
+
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3,
+            speaking_rate=0.90, # Slightly slower for gravitas
+            pitch=-1.0
+        )
+
+        try:
+            response = self.client.synthesize_speech(
+                input=synthesis_input, voice=voice, audio_config=audio_config
+            )
+            return response.audio_content
+        except Exception as e:
+            st.error(f"TTS Error: {e}")
+            return None
+
+
+# --- UI Components ---
+
+def render_overlay(image_path, phrase, reference):
+    """Renders the HTML/CSS overlay for the verse"""
+    
+    # If it's a local file, we need to encode it
+    if image_path.startswith("http"):
+        img_src = image_path
+    else:
+        with open(image_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode()
+        img_src = f"data:image/png;base64,{encoded}"
+
+    html_code = f"""
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@700&family=Lato:wght@400&display=swap');
+        .container {{
+            position: relative; width: 100%; height: 400px; border-radius: 15px; overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }}
+        .bg-img {{
+            width: 100%; height: 100%; object-fit: cover;
+            transition: transform 5s ease;
+        }}
+        .container:hover .bg-img {{ transform: scale(1.05); }}
+        .overlay {{
+            position: absolute; bottom: 0; left: 0; width: 100%; height: 60%;
+            background: linear-gradient(to top, rgba(0,0,0,0.9), transparent);
+            display: flex; flex-direction: column; justify-content: flex-end;
+            padding: 30px; box-sizing: border-box; text-align: center;
+        }}
+        .phrase {{
+            font-family: 'Cinzel', serif; color: #fff; font-size: 28px; 
+            text-transform: uppercase; letter-spacing: 2px; margin-bottom: 10px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+        }}
+        .ref {{
+            font-family: 'Lato', sans-serif; color: rgba(255,255,255,0.8); font-size: 16px; font-style: italic;
+        }}
+    </style>
+    <div class="container">
+        <img src="{img_src}" class="bg-img">
+        <div class="overlay">
+            <div class="phrase">{phrase}</div>
+            <div class="ref">{reference}</div>
+        </div>
+    </div>
+    """
+    components.html(html_code, height=420)
+
+
+# --- Main App Logic ---
 
 def main():
-    st.title("Daily Grace")
-    st.write("Discover inspiration, comfort, and guidance every day with Daily Grace.")
+    cache = CacheManager()
+    content_gen = ContentGenerator()
+    img_gen = ImageGenerator()
+    audio_gen = AudioGenerator(GCP_CREDS)
 
-    app = DailyGraceApp()
+    st.title("Daily Grace 🌿")
+    st.markdown("_Inspiration, comfort, and guidance powered by Enterprise AI_")
+    st.divider()
 
-    # Generate new content
-    if st.button("🔄 Generate New Content") or 'content' not in st.session_state:
-        with st.spinner("Generating spiritual content..."):
-            if app.generate_new_content():
-                st.rerun()
+    # Generate Button
+    col_act, col_info = st.columns([1, 3])
+    with col_act:
+        if st.button("✨ New Devotion", type="primary", use_container_width=True):
+            cache.clear_current()
+            with st.spinner("Consulting scripture..."):
+                st.session_state.current_content = content_gen.get_spiritual_content()
+            
+            if st.session_state.current_content:
+                with st.spinner("Painting vision..."):
+                    prompt = st.session_state.current_content.get("image_prompt", "peaceful nature")
+                    st.session_state.generated_image_url = img_gen.generate(prompt)
 
-    if 'content' in st.session_state:
-        content = st.session_state.content
+    # Display Content
+    content = st.session_state.current_content
+    
+    if content:
+        # 1. Visual Header
+        render_overlay(
+            st.session_state.generated_image_url, 
+            content.get("key_phrase", "Grace"), 
+            content.get("daily_verse", "").split("(")[-1].strip(")") 
+        )
 
-        # Display verse and overlay image
-        st.subheader("📖 Daily Bible Verse")
-        verse = content.get("daily_verse", "")
-        st.write(verse)
+        # 2. The Verse
+        st.info(f"**Scripture:** {content.get('daily_verse')}")
 
-        if 'image_url' in st.session_state:
-            key_phrase = app.api_client.extract_key_phrase(verse)
-            reference = re.search(r'\((.*?)\)', verse).group(1) if '(' in verse else ''
+        # 3. Three Column Layout
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("### 💭 Reflection")
+            st.write(content.get("daily_devotional"))
+        with c2:
+            st.markdown("### 🙏 Prayer")
+            st.write(content.get("prayer_guide"))
+        with c3:
+            st.markdown("### 🕯️ Insight")
+            st.write(content.get("religious_insight"))
 
-            overlay_html = app.create_overlay_html(
-                st.session_state.image_url,
-                key_phrase,
-                reference
-            )
-            components.html(overlay_html, height=450)
+        st.divider()
 
-        # Display other content
-        st.subheader("💭 Daily Devotional")
-        st.write(content.get("daily_devotional", ""))
+        # 4. Audio Section
+        st.markdown("### 🎙️ Guided Meditation")
+        sermon_text = content.get("guided_scripture_sermon")
+        
+        with st.expander("Read the message"):
+            st.write(sermon_text)
 
-        st.subheader("🙏 Prayer Guide")
-        st.write(content.get("prayer_guide", ""))
-
-        st.subheader("🕊️ Religious Insight")
-        st.write(content.get("religious_insight", ""))
-
-        # Handle sermon and audio
-        st.subheader("🎙️ Guided Scripture")
-        sermon_text = content.get("guided_scripture", "")
-        if sermon_text:
-            with st.expander("Read Sermon", expanded=True):
-                st.write(sermon_text)
-
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                if st.button("🔊 Generate Audio"):
-                    with st.spinner("Converting sermon to speech..."):
-                        audio_file = app.api_client.convert_text_to_speech(sermon_text)
-                        if audio_file:
-                            st.session_state.audio_file = audio_file
-                            st.session_state.show_download = True
-
-            with col2:
-                if 'audio_file' in st.session_state and 'show_download' in st.session_state:
-                    st.audio(st.session_state.audio_file)
-                    st.download_button(
-                        "📥 Download Sermon Audio",
-                        data=open(st.session_state.audio_file, 'rb'),
-                        file_name="daily_sermon.mp3",
-                        mime="audio/mp3"
-                    )
-
+        if st.button("🔊 Listen to Message"):
+            if not st.session_state.audio_data:
+                with st.spinner("Synthesizing voice..."):
+                    st.session_state.audio_data = audio_gen.generate_speech(sermon_text)
+            
+            if st.session_state.audio_data:
+                st.audio(st.session_state.audio_data, format="audio/mp3")
 
 if __name__ == "__main__":
     main()
